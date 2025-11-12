@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_local
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_ENCRYPTION_KEY=your_encryption_key_here_change_this
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=admin123
+      - EXECUTIONS_PROCESS=main
+      - OLLAMA_API_URL=http://ollama:11434
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+    restart: unless-stopped
+    networks:
+      - automation_network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama_local
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama:/root/.ollama
+    environment:
+      - OLLAMA_NO_METAL=1
+    restart: unless-stopped
+    networks:
+      - automation_network
+
+networks:
+  automation_network:
+    driver: bridge
+
