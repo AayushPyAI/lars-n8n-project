@@ -1,0 +1,17 @@
+# Python dependencies for Phase 2: RAG Database
+# Install with: pip install -r requirements.txt
+
+# Vector database
+faiss-cpu>=1.7.4
+
+# Embeddings and text processing
+numpy>=1.24.0
+requests>=2.31.0
+
+# Email processing
+beautifulsoup4>=4.12.0
+html2text>=2020.1.16
+
+# Data storage
+python-dotenv>=1.0.0
+

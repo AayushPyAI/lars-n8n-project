@@ -36,3 +36,7 @@ credentials.json
 # Logs
 *.log
 
+# RAG Database
+rag_data/
+*.faiss
+
