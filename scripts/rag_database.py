@@ -210,13 +210,20 @@ class RAGDatabase:
     
     def save_database(self):
         """Save database to disk."""
+        print(f"💾 Saving database to: {self.db_path}")
+        print(f"   Total metadata entries: {len(self.metadata)}")
+        
         # Save FAISS index
         if self.index is not None:
-            faiss.write_index(self.index, str(self.db_path / "index.faiss"))
+            index_path = self.db_path / "index.faiss"
+            faiss.write_index(self.index, str(index_path))
+            print(f"   ✅ FAISS index saved: {index_path}")
         
         # Save metadata
-        with open(self.db_path / "metadata.json", 'w', encoding='utf-8') as f:
+        metadata_path = self.db_path / "metadata.json"
+        with open(metadata_path, 'w', encoding='utf-8') as f:
             json.dump(self.metadata, f, indent=2, ensure_ascii=False)
+        print(f"   ✅ Metadata saved: {metadata_path} ({len(self.metadata)} entries)")
     
     def load_database(self):
         """Load database from disk."""
