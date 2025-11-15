@@ -9,6 +9,7 @@ from flask_cors import CORS
 import sys
 import re
 import hashlib
+import json
 from pathlib import Path
 
 # Add scripts to path
@@ -32,7 +33,36 @@ print(f"RAG Database initialized at: {RAG_DB_PATH}")
 # Simple deduplication cache (email_id -> timestamp)
 # Prevents processing the same email multiple times within a short window
 processed_emails = {}
-DUPLICATE_WINDOW = 30  # 30 seconds (reduced for testing, can increase to 300 for production)
+DUPLICATE_WINDOW = 300  # 5 minutes (300 seconds) - Change to 30 for testing
+
+# Draft storage (draft_id -> draft_data)
+# Stores created drafts so we can match them with sent emails
+drafts_storage = {}
+DRAFTS_FILE = os.path.join(RAG_DB_PATH, "drafts_storage.json")
+
+# Load existing drafts
+def load_drafts():
+    """Load drafts from disk."""
+    global drafts_storage
+    if os.path.exists(DRAFTS_FILE):
+        try:
+            with open(DRAFTS_FILE, 'r', encoding='utf-8') as f:
+                drafts_storage = json.load(f)
+            print(f"📋 Loaded {len(drafts_storage)} stored drafts", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ Error loading drafts: {e}", file=sys.stderr)
+            drafts_storage = {}
+
+def save_drafts():
+    """Save drafts to disk."""
+    try:
+        with open(DRAFTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(drafts_storage, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Error saving drafts: {e}", file=sys.stderr)
+
+# Load drafts on startup
+load_drafts()
 
 
 @app.route('/health', methods=['GET'])
@@ -341,15 +371,33 @@ def generate_draft():
         # Search RAG database for relevant context
         query_text = f"{incoming_email.get('subject', '')} {incoming_email.get('body', '')}"
         category = incoming_email.get('category')
+        
+        # First, try to get feedback emails (user-edited versions) - these are most valuable
+        feedback_emails = []
+        all_context = rag_db.search(query_text, k=10, user_id=user_id, category=None)  # Get more results
+        for email in all_context:
+            if email.get('is_feedback') or email.get('category') == 'user_feedback':
+                feedback_emails.append(email)
+        
+        # Then get regular context emails
         context_emails = rag_db.search(query_text, k=5, user_id=user_id, category=category)
         
-        # Extract user writing style from context emails
+        # Prioritize feedback emails in style examples
         style_examples = []
-        for email in context_emails[:3]:  # Use top 3 for style
+        # Add feedback emails first (these represent user's preferred style)
+        for email in feedback_emails[:2]:  # Top 2 feedback emails
             style_examples.append({
                 "subject": email.get('subject', ''),
-                "body": email.get('body', '')[:500]  # Limit length
+                "body": email.get('body', '')[:500],
+                "is_feedback": True
             })
+        # Then add regular context emails
+        for email in context_emails[:3]:  # Top 3 regular emails
+            if len(style_examples) < 5:  # Limit total to 5
+                style_examples.append({
+                    "subject": email.get('subject', ''),
+                    "body": email.get('body', '')[:500]
+                })
         
         # Build prompt for Ollama
         context_text = ""
@@ -361,9 +409,10 @@ def generate_draft():
         
         style_text = ""
         if style_examples:
-            style_text = "\n\nYour writing style examples:\n"
+            style_text = "\n\nYour writing style examples (prioritize matching this style):\n"
             for i, ex in enumerate(style_examples, 1):
-                style_text += f"\n{i}. Subject: {ex['subject']}\n"
+                feedback_note = " [USER-EDITED - HIGH PRIORITY]" if ex.get('is_feedback') else ""
+                style_text += f"\n{i}. Subject: {ex['subject']}{feedback_note}\n"
                 style_text += f"   Body: {ex['body'][:200]}...\n"
         
         # Extract sender name from email body signature or email address
@@ -607,10 +656,32 @@ Best regards"""
             draft_subject = original_subject
         
         # Log generated draft
-        print(f"✅ Draft generated:")
-        print(f"   Subject: {draft_subject}")
-        print(f"   Body preview: {draft_body[:150]}...")
-        print(f"   Context emails used: {len(context_emails)}")
+        print(f"✅ Draft generated:", file=sys.stderr)
+        print(f"   Subject: {draft_subject}", file=sys.stderr)
+        print(f"   Body preview: {draft_body[:150]}...", file=sys.stderr)
+        print(f"   Context emails used: {len(context_emails)}", file=sys.stderr)
+        
+        # Store draft for feedback tracking
+        draft_id = f"{email_id}_draft_{int(time.time())}"
+        global drafts_storage
+        drafts_storage[draft_id] = {
+            "draft_id": draft_id,
+            "original_draft": {
+                "subject": draft_subject,
+                "body": draft_body
+            },
+            "incoming_email_id": email_id,
+            "incoming_email": {
+                "subject": incoming_email.get('subject', ''),
+                "from": incoming_email.get('from', ''),
+                "body": incoming_email.get('body', '')[:200]  # Store preview
+            },
+            "user_id": user_id,
+            "created_at": time.time(),
+            "category": category
+        }
+        save_drafts()
+        print(f"💾 Draft stored with ID: {draft_id}", file=sys.stderr)
         
         return jsonify({
             "success": True,
@@ -618,8 +689,223 @@ Best regards"""
                 "subject": draft_subject,
                 "body": draft_body
             },
+            "draft_id": draft_id,  # Return draft ID for tracking
             "context_used": len(context_emails),
             "style_examples_used": len(style_examples)
+        })
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/find-draft', methods=['POST'])
+def find_draft():
+    """
+    Find a draft by subject and recipient (for matching sent emails with drafts).
+    
+    Expected JSON:
+    {
+        "subject": "Re: ...",
+        "to": "recipient@example.com",
+        "user_id": "user1"
+    }
+    """
+    try:
+        import sys
+        data = request.json
+        subject = data.get('subject', '').strip()
+        to_email = data.get('to', '').strip()
+        user_id = data.get('user_id', 'default')
+        
+        print(f"🔍 Searching for draft:", file=sys.stderr)
+        print(f"   Subject: {subject}", file=sys.stderr)
+        print(f"   To: {to_email}", file=sys.stderr)
+        print(f"   User ID: {user_id}", file=sys.stderr)
+        
+        global drafts_storage
+        matching_drafts = []
+        
+        # Search for matching drafts (within last 7 days)
+        current_time = time.time()
+        seven_days_ago = current_time - (7 * 24 * 60 * 60)
+        
+        for draft_id, draft_data in drafts_storage.items():
+            # Check if draft matches
+            if draft_data.get('user_id') != user_id:
+                continue
+            
+            # Check if draft is recent (within 7 days)
+            if draft_data.get('created_at', 0) < seven_days_ago:
+                continue
+            
+            draft_subject = draft_data.get('original_draft', {}).get('subject', '').strip()
+            
+            # Match by subject (fuzzy match - remove "Re:" and compare)
+            subject_clean = re.sub(r'^Re:\s*', '', subject, flags=re.IGNORECASE).strip()
+            draft_subject_clean = re.sub(r'^Re:\s*', '', draft_subject, flags=re.IGNORECASE).strip()
+            
+            if subject_clean.lower() == draft_subject_clean.lower():
+                matching_drafts.append({
+                    "draft_id": draft_id,
+                    "draft": draft_data.get('original_draft', {}),
+                    "incoming_email_id": draft_data.get('incoming_email_id', ''),
+                    "created_at": draft_data.get('created_at', 0)
+                })
+        
+        # Sort by creation time (most recent first)
+        matching_drafts.sort(key=lambda x: x.get('created_at', 0), reverse=True)
+        
+        if matching_drafts:
+            best_match = matching_drafts[0]
+            print(f"✅ Found matching draft: {best_match['draft_id']}", file=sys.stderr)
+            return jsonify({
+                "success": True,
+                "found": True,
+                "draft": best_match
+            })
+        else:
+            print(f"⚠️ No matching draft found", file=sys.stderr)
+            return jsonify({
+                "success": True,
+                "found": False,
+                "draft": None
+            })
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/update-feedback', methods=['POST'])
+def update_feedback():
+    """
+    Capture user edits to AI-generated drafts for improving future suggestions.
+    
+    Expected JSON:
+    {
+        "original_draft": {
+            "subject": "Re: ...",
+            "body": "Original draft text..."
+        },
+        "edited_version": {
+            "subject": "Re: ...",
+            "body": "Edited/sent version..."
+        },
+        "incoming_email_id": "email_id",
+        "user_id": "user1"
+    }
+    """
+    try:
+        import sys
+        data = request.json
+        edited_version = data.get('edited_version', {})
+        user_id = data.get('user_id', 'default')
+        
+        # If original_draft not provided, try to find it automatically
+        original_draft = data.get('original_draft', {})
+        incoming_email_id = data.get('incoming_email_id', '')
+        
+        if not original_draft.get('subject') or not original_draft.get('body'):
+            # Try to find draft by subject
+            subject = edited_version.get('subject', '')
+            if subject:
+                print(f"🔍 Original draft not provided, searching by subject: {subject}", file=sys.stderr)
+                global drafts_storage
+                matching_drafts = []
+                current_time = time.time()
+                seven_days_ago = current_time - (7 * 24 * 60 * 60)
+                
+                for draft_id, draft_data in drafts_storage.items():
+                    if draft_data.get('user_id') != user_id:
+                        continue
+                    if draft_data.get('created_at', 0) < seven_days_ago:
+                        continue
+                    
+                    draft_subject = draft_data.get('original_draft', {}).get('subject', '').strip()
+                    subject_clean = re.sub(r'^Re:\s*', '', subject, flags=re.IGNORECASE).strip()
+                    draft_subject_clean = re.sub(r'^Re:\s*', '', draft_subject, flags=re.IGNORECASE).strip()
+                    
+                    if subject_clean.lower() == draft_subject_clean.lower():
+                        matching_drafts.append((draft_data, draft_data.get('created_at', 0)))
+                
+                if matching_drafts:
+                    # Get most recent match
+                    matching_drafts.sort(key=lambda x: x[1], reverse=True)
+                    best_match = matching_drafts[0][0]
+                    original_draft = best_match.get('original_draft', {})
+                    incoming_email_id = best_match.get('incoming_email_id', incoming_email_id)
+                    print(f"✅ Found matching draft: {best_match.get('draft_id', 'N/A')}", file=sys.stderr)
+                else:
+                    print(f"⚠️ No matching draft found, will store edited version anyway", file=sys.stderr)
+        
+        print("=" * 60, file=sys.stderr)
+        print("📝 Processing feedback/edits:", file=sys.stderr)
+        print(f"   Original subject: {original_draft.get('subject', 'N/A')}", file=sys.stderr)
+        print(f"   Edited subject: {edited_version.get('subject', 'N/A')}", file=sys.stderr)
+        print(f"   User ID: {user_id}", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        
+        # Compare original vs edited to identify changes
+        original_body = original_draft.get('body', '').strip()
+        edited_body = edited_version.get('body', '').strip()
+        
+        # Calculate similarity (simple character-based for now)
+        if original_body and edited_body:
+            # Normalize whitespace for comparison
+            orig_norm = re.sub(r'\s+', ' ', original_body)
+            edit_norm = re.sub(r'\s+', ' ', edited_body)
+            
+            # Simple similarity check
+            if orig_norm == edit_norm:
+                changes_detected = False
+                print("ℹ️ No changes detected - draft was sent as-is", file=sys.stderr)
+            else:
+                changes_detected = True
+                print("✅ Changes detected - storing edited version for learning", file=sys.stderr)
+        else:
+            changes_detected = False
+        
+        # Store the edited version in RAG database as a "sent" email
+        # This represents the user's preferred style/response
+        idx = None
+        if changes_detected or True:  # Always store to learn from user's final version
+            email_data = {
+                'subject': edited_version.get('subject', original_draft.get('subject', '')),
+                'body': edited_body,
+                'from': user_id,  # The user who sent it
+                'to': '',  # Will be filled from incoming email if available
+                'receivedDateTime': '',  # Will use current time
+                'user_id': user_id,
+                'category': 'user_feedback',  # Special category for feedback
+                'is_feedback': True,  # Mark as feedback
+                'original_draft_id': incoming_email_id
+            }
+            
+            # Clean and classify
+            email_data = clean_email_body(email_data)
+            # Don't reclassify feedback emails - keep as 'user_feedback'
+            
+            # Add to RAG database
+            idx = rag_db.add_email(email_data)
+            rag_db.save_database()
+            
+            print(f"✅ Stored edited version in RAG database (index: {idx})", file=sys.stderr)
+            print(f"   This will be used to improve future draft generation", file=sys.stderr)
+        
+        return jsonify({
+            "success": True,
+            "changes_detected": changes_detected,
+            "message": "Feedback processed and stored in RAG database",
+            "index": idx
         })
     
     except Exception as e:
@@ -655,8 +941,11 @@ if __name__ == '__main__':
     print("   - POST /process-batch - Process multiple emails")
     print("   - POST /search - Search RAG database")
     print("   - POST /generate-draft - Generate email draft")
+    print("   - POST /find-draft - Find draft by subject/recipient")
+    print("   - POST /update-feedback - Capture user edits for learning")
     print("   - GET /stats - Get database statistics")
     print("   - GET /health - Health check")
+    print("   - GET/POST /clear-cache - Clear deduplication cache")
     print()
     app.run(host='0.0.0.0', port=5000, debug=True)
 
