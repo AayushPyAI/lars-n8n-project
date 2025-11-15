@@ -7,6 +7,7 @@ Simple HTTP server for n8n to call for processing emails and storing in RAG data
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sys
+import re
 from pathlib import Path
 
 # Add scripts to path
@@ -22,15 +23,33 @@ CORS(app)  # Allow n8n to call this API
 # Initialize RAG database
 # Use absolute path to ensure correct location
 import os
+import time
 RAG_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rag_data")
 rag_db = RAGDatabase(db_path=RAG_DB_PATH, ollama_url="http://localhost:11434")
 print(f"RAG Database initialized at: {RAG_DB_PATH}")
+
+# Simple deduplication cache (email_id -> timestamp)
+# Prevents processing the same email multiple times within a short window
+processed_emails = {}
+DUPLICATE_WINDOW = 30  # 30 seconds (reduced for testing, can increase to 300 for production)
 
 
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
     return jsonify({"status": "ok", "message": "RAG API Server is running"})
+
+
+@app.route('/clear-cache', methods=['POST', 'GET'])
+def clear_cache():
+    """Clear deduplication cache (useful for testing)."""
+    global processed_emails
+    count = len(processed_emails)
+    processed_emails = {}
+    return jsonify({
+        "success": True,
+        "message": f"Cleared {count} entries from deduplication cache"
+    })
 
 
 @app.route('/process-email', methods=['POST'])
@@ -224,6 +243,323 @@ def search():
         }), 500
 
 
+@app.route('/generate-draft', methods=['POST'])
+def generate_draft():
+    """
+    Generate an email draft based on incoming email and RAG context.
+    
+    Expected JSON:
+    {
+        "incoming_email": {
+            "subject": "Email subject",
+            "body": "Email body text",
+            "from": "sender@example.com",
+            "category": "Rechnungen"
+        },
+        "user_id": "user1"
+    }
+    """
+    try:
+        import requests as req
+        import sys
+        
+        # Log raw request data for debugging
+        data = request.json
+        print("=" * 60, file=sys.stderr)
+        print("🔍 RAW REQUEST DATA:", file=sys.stderr)
+        print(f"   Full JSON: {data}", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        
+        # Handle both structures: direct or wrapped in "body" key
+        if 'body' in data and isinstance(data.get('body'), dict):
+            # Data is wrapped in "body" key (n8n sometimes does this)
+            actual_data = data.get('body', {})
+        else:
+            # Data is at root level (expected structure)
+            actual_data = data
+        
+        incoming_email = actual_data.get('incoming_email', {})
+        user_id = actual_data.get('user_id', 'default')
+        
+        # Log what we extracted
+        print(f"📧 Extracted data:", file=sys.stderr)
+        print(f"   Subject: '{incoming_email.get('subject', '')}'", file=sys.stderr)
+        print(f"   Body: '{incoming_email.get('body', '')[:100]}...'", file=sys.stderr)
+        print(f"   From: '{incoming_email.get('from', '')}'", file=sys.stderr)
+        print(f"   Category: '{incoming_email.get('category', '')}'", file=sys.stderr)
+        print(f"   User ID: '{user_id}'", file=sys.stderr)
+        
+        # Get email ID for deduplication (use subject + from + timestamp as unique key)
+        email_id = incoming_email.get('id') or f"{incoming_email.get('subject', '')}_{incoming_email.get('from', '')}_{incoming_email.get('receivedDateTime', '')}"
+        
+        # Use global processed_emails
+        global processed_emails
+        
+        # Check for duplicate processing
+        current_time = time.time()
+        if email_id in processed_emails:
+            last_processed = processed_emails[email_id]
+            time_since = current_time - last_processed
+            if time_since < DUPLICATE_WINDOW:
+                wait_time = int(DUPLICATE_WINDOW - time_since)
+                print(f"⚠️ Duplicate request detected for email: {incoming_email.get('subject', 'N/A')} (ID: {email_id[:50]})", file=sys.stderr)
+                print(f"   Last processed: {int(time_since)}s ago, wait {wait_time}s more", file=sys.stderr)
+                return jsonify({
+                    "success": False,
+                    "error": f"This email was already processed {int(time_since)} seconds ago. Please wait {wait_time} more seconds before generating another draft.",
+                    "draft": None,
+                    "wait_seconds": wait_time
+                }), 429  # Too Many Requests
+        
+        # Validate required fields
+        if not incoming_email.get('subject') and not incoming_email.get('body'):
+            print("❌ ERROR: Missing both subject and body!", file=sys.stderr)
+            print(f"   Incoming email data: {incoming_email}", file=sys.stderr)
+        
+        # Log the email being processed
+        print(f"📧 Processing email draft request:", file=sys.stderr)
+        print(f"   Subject: {incoming_email.get('subject', 'N/A')}", file=sys.stderr)
+        print(f"   From: {incoming_email.get('from', 'N/A')}", file=sys.stderr)
+        print(f"   Category: {incoming_email.get('category', 'N/A')}", file=sys.stderr)
+        print(f"   Body preview: {incoming_email.get('body', '')[:100]}...", file=sys.stderr)
+        
+        # Mark as processed
+        processed_emails[email_id] = current_time
+        
+        # Clean up old entries (older than 1 hour)
+        cutoff_time = current_time - 3600
+        processed_emails = {k: v for k, v in processed_emails.items() if v > cutoff_time}
+        
+        # Search RAG database for relevant context
+        query_text = f"{incoming_email.get('subject', '')} {incoming_email.get('body', '')}"
+        category = incoming_email.get('category')
+        context_emails = rag_db.search(query_text, k=5, user_id=user_id, category=category)
+        
+        # Extract user writing style from context emails
+        style_examples = []
+        for email in context_emails[:3]:  # Use top 3 for style
+            style_examples.append({
+                "subject": email.get('subject', ''),
+                "body": email.get('body', '')[:500]  # Limit length
+            })
+        
+        # Build prompt for Ollama
+        context_text = ""
+        if context_emails:
+            context_text = "\n\nRelevant past emails:\n"
+            for i, email in enumerate(context_emails[:3], 1):
+                context_text += f"\n{i}. Subject: {email.get('subject', '')}\n"
+                context_text += f"   Body: {email.get('body', '')[:300]}...\n"
+        
+        style_text = ""
+        if style_examples:
+            style_text = "\n\nYour writing style examples:\n"
+            for i, ex in enumerate(style_examples, 1):
+                style_text += f"\n{i}. Subject: {ex['subject']}\n"
+                style_text += f"   Body: {ex['body'][:200]}...\n"
+        
+        # Extract sender name from email address
+        from_email = incoming_email.get('from', '')
+        sender_name = from_email.split('@')[0].replace('.', ' ').replace('_', ' ') if '@' in from_email else 'there'
+        
+        # Build the prompt with example
+        example_prompt = """Example:
+Incoming email:
+Subject: Meeting Request
+From: john.smith@example.com
+Body: Can we schedule a meeting next week?
+
+Reply:
+Hello,
+
+Thank you for reaching out. I'd be happy to schedule a meeting with you next week. 
+
+I'm available on Tuesday and Wednesday afternoon. Please let me know which time works best for you, and I'll send a calendar invitation.
+
+Best regards
+"""
+
+        prompt = f"""You are a professional email assistant. Write a business email reply in English.
+
+{example_prompt}
+
+Now write a reply to this email:
+
+INCOMING EMAIL:
+Subject: {incoming_email.get('subject', '')}
+From: {from_email}
+Body: {incoming_email.get('body', '')}
+Category: {category or 'sonstige'}
+
+{context_text}
+
+{style_text}
+
+IMPORTANT INSTRUCTIONS:
+1. Write ONLY the email body text - DO NOT include "Subject:" line in the body
+2. Address the sender (the person who sent the email FROM: {from_email}) - use "Hello," or "Hi," or extract their name from the email address
+3. Respond appropriately to what they are asking - read the incoming email body carefully
+4. Match the writing style from the examples above
+5. Keep it concise (2-4 paragraphs)
+6. End with a professional closing (e.g., "Best regards," "Sincerely,")
+7. DO NOT include separators like "---" or "---" at the end
+8. DO NOT include the subject line in the body - only write the body content
+
+REPLY (email body only, no subject line):"""
+
+        # Call Ollama to generate draft
+        ollama_url = "http://localhost:11434"
+        generate_url = f"{ollama_url}/api/generate"
+        
+        payload = {
+            "model": "llama3.2:3b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "num_predict": 500
+            }
+        }
+        
+        response = req.post(generate_url, json=payload, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        
+        draft_body = result.get('response', '').strip()
+        
+        # Clean up the draft body
+        # Remove subject line if included
+        lines = draft_body.split('\n')
+        cleaned_lines = []
+        skip_next_if_empty = False
+        
+        for line in lines:
+            line_stripped = line.strip()
+            # Skip lines that are subject lines
+            if line_stripped.lower().startswith('subject:'):
+                skip_next_if_empty = True
+                continue
+            # Skip empty line after subject if present
+            if skip_next_if_empty and not line_stripped:
+                skip_next_if_empty = False
+                continue
+            skip_next_if_empty = False
+            
+            # Skip separator lines
+            if line_stripped.startswith('---') or line_stripped == '---':
+                continue
+            
+            cleaned_lines.append(line)
+        
+        draft_body = '\n'.join(cleaned_lines).strip()
+        
+        # Remove any remaining "---" at the end
+        while draft_body.endswith('---') or draft_body.endswith('---'):
+            draft_body = draft_body.rstrip('-').strip()
+        
+        # Remove common placeholders
+        placeholder_patterns = [
+            r'\[Your Name\]',
+            r'\[Ihr Name\]',
+            r'\[Name\]',
+            r'\[Dein Name\]',
+            r'\[Insert Name\]',
+            r'\[Your Name Here\]'
+        ]
+        for pattern in placeholder_patterns:
+            draft_body = re.sub(pattern, '', draft_body, flags=re.IGNORECASE)
+        
+        # Clean up any double newlines or trailing whitespace
+        draft_body = re.sub(r'\n{3,}', '\n\n', draft_body).strip()
+        
+        # Clean up response - remove refusal messages completely
+        refusal_phrases = [
+            "i can't fulfill this request",
+            "i cannot fulfill",
+            "i'm not able to",
+            "i cannot assist",
+            "i can only assist",
+            "i can only provide",
+            "is there anything else i can help",
+            "can i help you with something else",
+            "explicit content"
+        ]
+        
+        # Check if response is a refusal
+        draft_lower = draft_body.lower()
+        is_refusal = any(phrase in draft_lower for phrase in refusal_phrases)
+        
+        if is_refusal or len(draft_body) < 50:
+            # Completely replace refusal with a proper reply based on email content
+            subject = incoming_email.get('subject', '').lower()
+            body = incoming_email.get('body', '').lower()
+            category = incoming_email.get('category', 'sonstige')
+            
+            # Generate context-aware reply
+            if 'invoice' in subject or 'invoice' in body or 'payment' in body or category == 'Rechnungen':
+                draft_body = f"""Hello,
+
+Thank you for your email regarding the invoice.
+
+I've received your message and will review the details. I'll get back to you shortly with an update.
+
+If you have any questions in the meantime, please don't hesitate to reach out.
+
+Best regards"""
+            elif 'meeting' in subject or 'meeting' in body or 'schedule' in body or category == 'Terminabstimmung':
+                draft_body = f"""Hello,
+
+Thank you for your meeting request.
+
+I'd be happy to schedule a meeting with you. Could you please let me know your availability for next week? I'm flexible with times and can work around your schedule.
+
+Please let me know what works best for you.
+
+Best regards"""
+            else:
+                draft_body = f"""Hello,
+
+Thank you for your email regarding "{incoming_email.get('subject', 'this matter')}".
+
+I've received your message and will review it carefully. I'll get back to you shortly with a response.
+
+If you need immediate assistance, please don't hesitate to reach out.
+
+Best regards"""
+        
+        # Generate subject (usually "Re: " + original subject)
+        original_subject = incoming_email.get('subject', '')
+        if not original_subject.startswith('Re:'):
+            draft_subject = f"Re: {original_subject}"
+        else:
+            draft_subject = original_subject
+        
+        # Log generated draft
+        print(f"✅ Draft generated:")
+        print(f"   Subject: {draft_subject}")
+        print(f"   Body preview: {draft_body[:150]}...")
+        print(f"   Context emails used: {len(context_emails)}")
+        
+        return jsonify({
+            "success": True,
+            "draft": {
+                "subject": draft_subject,
+                "body": draft_body
+            },
+            "context_used": len(context_emails),
+            "style_examples_used": len(style_examples)
+        })
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/stats', methods=['GET'])
 def stats():
     """Get RAG database statistics."""
@@ -247,6 +583,7 @@ if __name__ == '__main__':
     print("   - POST /process-email - Process single email")
     print("   - POST /process-batch - Process multiple emails")
     print("   - POST /search - Search RAG database")
+    print("   - POST /generate-draft - Generate email draft")
     print("   - GET /stats - Get database statistics")
     print("   - GET /health - Health check")
     print()
