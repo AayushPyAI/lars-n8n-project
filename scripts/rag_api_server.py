@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sys
 import re
+import hashlib
 from pathlib import Path
 
 # Add scripts to path
@@ -289,8 +290,13 @@ def generate_draft():
         print(f"   Category: '{incoming_email.get('category', '')}'", file=sys.stderr)
         print(f"   User ID: '{user_id}'", file=sys.stderr)
         
-        # Get email ID for deduplication (use subject + from + timestamp as unique key)
-        email_id = incoming_email.get('id') or f"{incoming_email.get('subject', '')}_{incoming_email.get('from', '')}_{incoming_email.get('receivedDateTime', '')}"
+        # Get email ID for deduplication (use subject + from + body hash as unique key)
+        # Normalize body (remove extra whitespace, normalize line breaks) before hashing
+        body_normalized = re.sub(r'\s+', ' ', incoming_email.get('body', '').strip())
+        body_hash = hashlib.md5(body_normalized.encode()).hexdigest()[:8]
+        email_id = incoming_email.get('id') or f"{incoming_email.get('subject', '').strip()}_{incoming_email.get('from', '').strip()}_{body_hash}"
+        
+        print(f"🔑 Email ID for deduplication: {email_id[:80]}...", file=sys.stderr)
         
         # Use global processed_emails
         global processed_emails
@@ -325,6 +331,8 @@ def generate_draft():
         
         # Mark as processed
         processed_emails[email_id] = current_time
+        print(f"✅ Marked email as processed (ID: {email_id[:50]}...)", file=sys.stderr)
+        print(f"   Total emails in cache: {len(processed_emails)}", file=sys.stderr)
         
         # Clean up old entries (older than 1 hour)
         cutoff_time = current_time - 3600
@@ -358,9 +366,69 @@ def generate_draft():
                 style_text += f"\n{i}. Subject: {ex['subject']}\n"
                 style_text += f"   Body: {ex['body'][:200]}...\n"
         
-        # Extract sender name from email address
+        # Extract sender name from email body signature or email address
         from_email = incoming_email.get('from', '')
-        sender_name = from_email.split('@')[0].replace('.', ' ').replace('_', ' ') if '@' in from_email else 'there'
+        email_body = incoming_email.get('body', '')
+        
+        # Try to extract name from email signature (look for "Best regards," or "Regards," followed by name)
+        sender_name = None
+        
+        # First, try to find signature closings and extract name from the line after
+        signature_closings = ['Best regards', 'Regards', 'Sincerely', 'Kind regards', 'Thanks', 'Thank you']
+        lines = email_body.split('\n')
+        
+        # Look for signature closing and get the next non-empty line as potential name
+        for i, line in enumerate(lines):
+            line_lower = line.strip().lower()
+            # Check if this line contains a signature closing
+            if any(closing.lower() in line_lower for closing in signature_closings):
+                # Look at the next few lines for a name
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    potential_name = lines[j].strip()
+                    # Validate it looks like a name (2-3 words, proper capitalization, not too long)
+                    if potential_name and len(potential_name.split()) >= 1 and len(potential_name.split()) <= 3:
+                        # Check if it starts with capital letter and doesn't contain common non-name words
+                        words = potential_name.split()
+                        if (all(word[0].isupper() for word in words if word) and 
+                            len(potential_name) < 50 and
+                            not any(word.lower() in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+                                                     'afternoon', 'morning', 'evening', 'week', 'meeting', 'call', 'email'] 
+                                    for word in words)):
+                            sender_name = potential_name
+                            print(f"✅ Extracted sender name from signature: '{sender_name}'", file=sys.stderr)
+                            break
+                if sender_name:
+                    break
+        
+        # If not found, try regex patterns as fallback
+        if not sender_name:
+            signature_patterns = [
+                # Pattern 1: "Best regards,\nSarah Johnson" (name on new line after closing)
+                r'(?:Best regards|Regards|Sincerely|Kind regards)[,\s]*\n\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*$',
+                # Pattern 2: "Best regards, Sarah Johnson" (name on same line)
+                r'(?:Best regards|Regards|Sincerely|Kind regards)[,\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*$',
+            ]
+            for pattern in signature_patterns:
+                match = re.search(pattern, email_body, re.IGNORECASE | re.MULTILINE)
+                if match:
+                    potential_name = match.group(1).strip()
+                    # Validate it's a real name
+                    words = potential_name.split()
+                    if (len(words) >= 1 and len(words) <= 3 and
+                        all(word[0].isupper() for word in words) and
+                        not any(word.lower() in ['monday', 'tuesday', 'afternoon', 'morning', 'week', 'meeting'] 
+                                for word in words)):
+                        sender_name = potential_name
+                        print(f"✅ Extracted sender name via regex: '{sender_name}'", file=sys.stderr)
+                        break
+        
+        # If still not found, use generic greeting
+        if not sender_name:
+            sender_name = None
+            print(f"⚠️ Could not extract sender name, will use generic greeting", file=sys.stderr)
+        else:
+            # Clean up the name
+            sender_name = re.sub(r'\s+', ' ', sender_name).strip()
         
         # Build the prompt with example
         example_prompt = """Example:
@@ -388,6 +456,7 @@ Now write a reply to this email:
 INCOMING EMAIL:
 Subject: {incoming_email.get('subject', '')}
 From: {from_email}
+Sender Name: {sender_name if sender_name else 'Not specified - use generic greeting'}
 Body: {incoming_email.get('body', '')}
 Category: {category or 'sonstige'}
 
@@ -397,15 +466,17 @@ Category: {category or 'sonstige'}
 
 IMPORTANT INSTRUCTIONS:
 1. Write ONLY the email body text - DO NOT include "Subject:" line in the body
-2. Address the sender (the person who sent the email FROM: {from_email}) - use "Hello," or "Hi," or extract their name from the email address
+2. Address the sender: {"Use 'Hello " + sender_name + ",' or 'Hi " + sender_name + ",' at the beginning" if sender_name else "Use 'Hello,' or 'Hi there,' (do NOT use the email address name)"}
 3. Respond appropriately to what they are asking - read the incoming email body carefully
 4. Match the writing style from the examples above
 5. Keep it concise (2-4 paragraphs)
-6. End with a professional closing (e.g., "Best regards," "Sincerely,")
+6. End with a professional closing (e.g., "Best regards," "Sincerely,") - DO NOT include your own name after the closing
 7. DO NOT include separators like "---" or "---" at the end
 8. DO NOT include the subject line in the body - only write the body content
+9. DO NOT address yourself - address the person who sent you the email
+10. DO NOT sign with your own name - just end with "Best regards," or similar
 
-REPLY (email body only, no subject line):"""
+REPLY (email body only, no subject line, no signature):"""
 
         # Call Ollama to generate draft
         ollama_url = "http://localhost:11434"
