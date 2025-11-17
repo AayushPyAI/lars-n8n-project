@@ -1,0 +1,175 @@
+Extract email data  :
+
+const email = $input.item.json;
+
+// Skip if this is a draft we created (has our generic response)
+const bodyPreview = email.bodyPreview || '';
+const body = email.body?.content || '';
+if (bodyPreview.includes('Thank you for your email regarding') || 
+    body.includes('Thank you for your email regarding')) {
+  // This is a draft we created, skip it
+  return [];
+}
+
+// Extract email data from Outlook trigger
+const incomingEmail = {
+  id: email.id || '',
+  subject: email.subject || '',
+  body: email.body?.content || email.bodyPreview || '',
+  from: email.from?.emailAddress?.address || 
+        email.sender?.emailAddress?.address || 
+        email.from || '',
+  receivedDateTime: email.receivedDateTime || email.sentDateTime || '',
+  bodyPreview: email.bodyPreview || ''
+};
+
+// Clean HTML from body
+let bodyText = incomingEmail.body;
+if (bodyText && bodyText.includes('<')) {
+  // Remove HTML tags
+  bodyText = bodyText.replace(/<[^>]*>/g, '');
+  // Decode HTML entities
+  bodyText = bodyText.replace(/&nbsp;/g, ' ')
+                     .replace(/&amp;/g, '&')
+                     .replace(/&lt;/g, '<')
+                     .replace(/&gt;/g, '>')
+                     .replace(/&quot;/g, '"');
+}
+
+// Validate we have required data
+if (!incomingEmail.subject && !incomingEmail.body) {
+  console.log('⚠️ Skipping email - no subject or body');
+  return [];
+}
+
+// Log what we're extracting (for debugging)
+console.log('📧 Extracting email:', {
+  subject: incomingEmail.subject,
+  from: incomingEmail.from,
+  hasBody: !!incomingEmail.body
+});
+
+// Use the dynamic Outlook user email as user_id
+const userId = incomingEmail.from || "unknown_user";
+
+return [{
+  json: {
+    incoming_email: {
+      ...incomingEmail,
+      body: bodyText || incomingEmail.bodyPreview || ''
+    },
+    user_id: userId
+  }
+}];
+
+
+
+
+
+
+Classify cateogires :
+
+const data = $input.item.json;
+const email = data.incoming_email || {};
+
+// Validate we have email data
+if (!email.subject && !email.body) {
+  console.log('⚠️ No email data found');
+  return [];
+}
+
+const subject = (email.subject || '').toLowerCase();
+const body = (email.body || '').toLowerCase();
+let category = 'sonstige';
+
+// Classify based on content
+if (subject.includes('rechnung') || body.includes('rechnung') || 
+    body.includes('zahlung') || body.includes('invoice') || 
+    body.includes('payment') || body.includes('follow up')) {
+  category = 'Rechnungen';
+} else if (subject.includes('termin') || body.includes('termin') || 
+           body.includes('besprechung') || body.includes('meeting') || 
+           body.includes('schedule')) {
+  category = 'Terminabstimmung';
+} else if (body.includes('intern') || subject.includes('intern')) {
+  category = 'Fachliche Information intern';
+} else if (body.includes('extern') || subject.includes('extern')) {
+  category = 'Fachliche Information extern';
+}
+
+// IMPORTANT: Preserve ALL incoming_email data
+return [{
+  json: {
+    incoming_email: {
+      id: email.id,
+      subject: email.subject || '',
+      body: email.body || '',
+      from: email.from || '',
+      receivedDateTime: email.receivedDateTime || '',
+      bodyPreview: email.bodyPreview || '',
+      category: category  // Add category to incoming_email too
+    },
+    category: category,
+    user_id: data.user_id
+  }
+}];
+
+
+
+
+Prepare api payload:
+
+const data = $input.item.json;
+
+// Extract actual values (not expressions)
+const payload = {
+  incoming_email: {
+    subject: data.incoming_email?.subject || '',
+    body: data.incoming_email?.body || '',
+    from: data.incoming_email?.from || '',
+    category: data.category || ''
+  },
+  user_id: data.user_id 
+};
+
+// Log for debugging
+console.log('Prepared payload:', {
+  subject: payload.incoming_email.subject,
+  from: payload.incoming_email.from,
+  category: payload.incoming_email.category
+});
+
+return [{
+  json: payload
+}];
+
+
+
+
+Format draft :
+
+const result = $input.item.json;
+const draft = result.draft;
+
+// Get original email from trigger node (more reliable)
+const triggerEmail = $('Microsoft Outlook Trigger').item.json;
+const category = $('Classify Category').item.json.category;
+
+// Extract sender email from trigger (try multiple fields)
+const replyTo = triggerEmail.from?.emailAddress?.address || 
+                 triggerEmail.sender?.emailAddress?.address || 
+                 triggerEmail.from || 
+                 '';
+
+// Get original email ID
+const originalEmail = $('Extract Email Data').item.json.incoming_email;
+
+return [{
+  json: {
+    subject: draft.subject,
+    body: draft.body,
+    to: replyTo,  // Sender's email for reply
+    original_email_id: originalEmail.id,
+    category: category
+  }
+}];

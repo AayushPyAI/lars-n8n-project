@@ -1,0 +1,151 @@
+fILTER NEW EMAILS:
+
+// Get all sent emails
+const emails = $input.all();
+
+// For testing: process all emails (remove time filter)
+// In production, you can add time-based filtering later
+const newEmails = [];
+
+for (const item of emails) {
+  const email = item.json;
+  // Process all emails for now (we'll deduplicate in the API)
+  newEmails.push(item);
+}
+
+console.log(`Processing ${newEmails.length} emails`);
+
+return newEmails;
+
+
+
+
+
+Extract send emails
+
+const email = $input.item.json;
+
+// Extract sent email data
+const sentEmail = {
+  id: email.id,
+  subject: email.subject || '',
+  body: email.body?.content || email.bodyPreview || '',
+  to: email.toRecipients?.[0]?.emailAddress?.address || 
+      (email.toRecipients && email.toRecipients.length > 0
+        ? email.toRecipients.map(r => r.emailAddress?.address).join(', ')
+        : ''),
+  sentDateTime: email.sentDateTime || email.receivedDateTime || '',
+  bodyPreview: email.bodyPreview || '',
+  from: email.from?.emailAddress?.address ||
+        email.sender?.emailAddress?.address ||
+        email.from || ''
+};
+
+// Clean HTML from body
+let bodyText = sentEmail.body;
+if (bodyText && bodyText.includes('<')) {
+  bodyText = bodyText.replace(/<[^>]*>/g, '');
+  bodyText = bodyText.replace(/&nbsp;/g, ' ')
+                     .replace(/&amp;/g, '&')
+                     .replace(/&lt;/g, '<')
+                     .replace(/&gt;/g, '>')
+                     .replace(/&quot;/g, '"');
+}
+
+// Extract a dynamic user ID (sender of the sent email)
+const userId = sentEmail.from || "unknown_user";
+
+return [{
+  json: {
+    sent_email: {
+      ...sentEmail,
+      body: bodyText || sentEmail.bodyPreview || ''
+    },
+    user_id: userId
+  }
+}];
+
+
+
+Find riginal draft htpp :
+
+{
+  "subject": "{{ $json.sent_email.subject }}",
+  "to": "{{ $json.sent_email.to }}",
+  "user_id": "{{ $json.user_id }}"
+}
+
+
+
+
+
+
+
+Prepare feedback data:
+
+const sentData = $('Extract Sent Email').item.json;
+const findDraftResult = $input.item.json;
+
+const sentEmail = sentData.sent_email;
+const user_id = sentData.user_id;
+
+// Check if draft was found
+let originalDraft = {
+  subject: '',
+  body: ''
+};
+let incomingEmailId = '';
+
+if (findDraftResult.found && findDraftResult.draft) {
+  // Use found draft
+  originalDraft = findDraftResult.draft.draft || findDraftResult.draft.original_draft || {};
+  incomingEmailId = findDraftResult.draft.incoming_email_id || '';
+  console.log('✅ Using found draft:', findDraftResult.draft.draft_id);
+} else {
+  // No draft found - this email might not have been AI-generated
+  // We'll still store it as feedback (user's preferred style)
+  console.log('⚠️ No matching draft found - storing sent email as feedback');
+}
+
+return [{
+  json: {
+    original_draft: {
+      subject: originalDraft.subject || sentEmail.subject,
+      body: originalDraft.body || ''
+    },
+    edited_version: {
+      subject: sentEmail.subject,
+      body: sentEmail.body
+    },
+    incoming_email_id: incomingEmailId,
+    user_id: user_id
+  }
+}];
+
+
+
+
+Prepare Update Feedback::
+
+const data = $input.item.json;
+
+// Build the API payload with actual values
+const payload = {
+  original_draft: {
+    subject: data.original_draft?.subject || '',
+    body: data.original_draft?.body || ''
+  },
+  edited_version: {
+    subject: data.edited_version?.subject || '',
+    body: data.edited_version?.body || ''
+  },
+  incoming_email_id: data.incoming_email_id || '',
+  user_id: data.user_id 
+};
+
+// Log for debugging
+console.log('Prepared update payload:', JSON.stringify(payload, null, 2));
+
+return [{
+  json: payload
+}];

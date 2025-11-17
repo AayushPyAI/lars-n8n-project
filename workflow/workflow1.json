@@ -1,0 +1,23 @@
+// Get all emails returned from Outlook
+const items = $input.all();
+
+// Collect all message JSONs
+const emails = items.map(i => i.json);
+
+const userId = items[0].json.from || "unknown_user";
+
+return [{
+  json: {
+    emails,
+    user_id: userId
+  }
+}];
+
+
+
+
+HTTPPOST:
+{
+    "emails": {{ JSON.stringify($json.emails) }},
+    "user_id": "{{ $json.user_id }}"
+  }
