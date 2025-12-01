@@ -1,0 +1,16 @@
+Start Ollama in Docker (Windows can’t run native Ollama)
+Open PowerShell as Administrator.
+Run:
+     docker run -d --name ollama -p 11434:11434 ollama/ollama
+
+
+
+
+Pull the required models inside the container
+   docker exec -it ollama ollama pull llama3.2:3b
+   docker exec -it ollama ollama pull nomic-embed-text
+
+
+   curl -X POST http://localhost:11434/api/generate `
+        -H "Content-Type: application/json" `
+        -d '{ "model": "llama3.2:3b", "prompt": "Hello" }'
