@@ -7,8 +7,8 @@ Run:
 
 
 Pull the required models inside the container
-   docker exec -it ollama ollama pull llama3.2:3b
-   docker exec -it ollama ollama pull nomic-embed-text
+  docker exec -it ollama_local ollama pull llama3.2:3b
+  docker exec -it ollama_local ollama pull nomic-embed-text
 
 
    curl -X POST http://localhost:11434/api/generate `
