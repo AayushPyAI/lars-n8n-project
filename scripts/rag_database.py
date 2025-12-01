@@ -139,9 +139,16 @@ class RAGDatabase:
         # Generate embedding
         embedding = self.generate_embedding(text)
         
-        # Ensure dimension is set
+        # Ensure dimension and FAISS index are set
+        # NOTE: On some setups (e.g. when Ollama is not reachable and we fall back
+        # to _simple_embedding), self.index can still be None even though
+        # self.dimension has a default value. That would cause
+        # "'NoneType' object has no attribute 'add'" when calling self.index.add().
         if self.dimension is None:
             self.dimension = len(embedding)
+        
+        if self.index is None:
+            # Lazily create the FAISS index once we know the embedding dimension
             self.index = faiss.IndexFlatL2(self.dimension)
         
         # Reshape for FAISS (needs to be 2D)
