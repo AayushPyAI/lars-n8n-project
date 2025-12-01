@@ -76,11 +76,20 @@ class RAGDatabase:
                         data = response.json()
                         embedding = np.array(data.get('embedding', []), dtype=np.float32)
                         
-                        # Set dimension from first embedding
-                        if self.dimension is None or self.dimension == 384:
+                        # Ensure dimension and index are consistent
+                        if self.index is None:
+                            # First time: create index using this embedding's dimension
                             self.dimension = len(embedding)
-                            if self.index is None:
-                                self.index = faiss.IndexFlatL2(self.dimension)
+                            self.index = faiss.IndexFlatL2(self.dimension)
+                        else:
+                            # If dimension from Ollama differs from the FAISS index dimension,
+                            # resize the embedding (pad or truncate) to avoid AssertionError.
+                            if len(embedding) != self.dimension:
+                                if len(embedding) > self.dimension:
+                                    embedding = embedding[:self.dimension]
+                                else:
+                                    padding = np.zeros(self.dimension - len(embedding), dtype=np.float32)
+                                    embedding = np.concatenate([embedding, padding])
                         
                         return embedding
                 except:
