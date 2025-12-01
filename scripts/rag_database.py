@@ -193,7 +193,18 @@ class RAGDatabase:
         query_embedding = query_embedding.reshape(1, -1).astype('float32')
         
         # Search in FAISS
-        distances, indices = self.index.search(query_embedding, min(k * 2, self.index.ntotal))
+        # FAISS requires k > 0 and k <= ntotal.
+        # On some installations, if ntotal is 0 or very small we can accidentally
+        # pass k=0 which raises an AssertionError inside faiss. Guard against that.
+        ntotal = self.index.ntotal
+        if ntotal == 0:
+            return []
+        
+        k_search = min(k * 2, ntotal)
+        if k_search <= 0:
+            return []
+        
+        distances, indices = self.index.search(query_embedding, k_search)
         
         # Filter and format results
         results = []
