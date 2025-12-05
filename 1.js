@@ -4,25 +4,20 @@ const items = $input.all();
 console.log(`📧 Total emails retrieved: ${items.length}`);
 
 // ============================================
-// PROCESS ALL EMAILS (no filtering)
+// PROCESS ALL EMAILS AUTOMATICALLY
+// No manual changes needed
 // ============================================
-const BATCH_SIZE = 50; // Adjust as needed
-const START_INDEX = 0;  // Change to 50, 100, 150... for next batches
 
-// Take batch
-const batch = items.slice(START_INDEX, START_INDEX + BATCH_SIZE);
-
-console.log(`🔄 Processing emails: ${START_INDEX} to ${START_INDEX + BATCH_SIZE}`);
-console.log(`✉️ Emails in this batch: ${batch.length}`);
-console.log(`⏭️ Remaining: ${Math.max(0, items.length - (START_INDEX + BATCH_SIZE))} emails`);
-
-// Prepare for API
-const emails = batch.map(i => i.json);
+// Prepare all emails for API
+const emails = items.map(i => i.json);
 
 // Extract user ID from first email
-const userId = batch[0]?.json?.from?.emailAddress?.address || 
-                batch[0]?.json?.sender?.emailAddress?.address || 
-                "Lars.Kiebula@tu-steuer.de";
+const userId = items[0]?.json?.from?.emailAddress?.address || 
+               items[0]?.json?.sender?.emailAddress?.address || 
+               "Lars.Kiebula@tu-steuer.de";
+
+console.log(`✅ Preparing ${emails.length} emails for processing`);
+console.log(`👤 User ID: ${userId}`);
 
 return [{
   json: {
