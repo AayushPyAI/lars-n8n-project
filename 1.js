@@ -1,61 +1,47 @@
-step 2 :
-
-// Get all emails from Outlook
+// ============================================
+// STEP 1: Get all emails from Outlook
+// ============================================
 const items = $input.all();
 
 console.log(`📧 Total emails retrieved: ${items.length}`);
 
-// Filter to only include SENT emails (not received)
+// ============================================
+// STEP 2: Filter to SENT emails only
+// ============================================
 const sentEmails = items.filter(item => {
   const email = item.json;
   
-  // Method 1: Check if email has 'sentDateTime' (only sent emails have this)
+  // Check if this is a sent email (not received)
   const hasSentDate = email.sentDateTime !== undefined && email.sentDateTime !== null;
-  
-  // Method 2: Check the 'isDraft' flag (exclude drafts)
   const isNotDraft = email.isDraft === false || email.isDraft === undefined;
-  
-  // Method 3: Check if the email has recipients (sent emails have 'toRecipients')
   const hasRecipients = email.toRecipients && email.toRecipients.length > 0;
   
-  // Method 4: Check conversationId or other metadata
-  // Sent emails typically have different properties than received ones
-  
-  // Combine conditions: must be sent, not draft, and have recipients
+  // Must have all three conditions to be a sent email
   return hasSentDate && isNotDraft && hasRecipients;
 });
 
-console.log(`✅ Sent emails: ${sentEmails.length}`);
-console.log(`❌ Filtered out: ${items.length - sentEmails.length}`);
+console.log(`✅ Sent emails found: ${sentEmails.length}`);
+console.log(`❌ Filtered out (received/drafts): ${items.length - sentEmails.length}`);
 
-// Return only sent emails
-return sentEmails;
+// ============================================
+// STEP 3: Process in batches (optional)
+// ============================================
+const BATCH_SIZE = 50; // Adjust as needed: 25, 50, 100, etc.
+const START_INDEX = 0;  // Change to 50, 100, 150... for subsequent runs
 
+// Take batch
+const batch = sentEmails.slice(START_INDEX, START_INDEX + BATCH_SIZE);
 
+console.log(`🔄 Batch range: ${START_INDEX} to ${START_INDEX + BATCH_SIZE}`);
+console.log(`📦 Processing: ${batch.length} emails`);
+console.log(`⏭️ Remaining: ${Math.max(0, sentEmails.length - (START_INDEX + BATCH_SIZE))} emails`);
 
-
-
-
-
-step 3 : 
-
-// Get filtered sent emails
-const items = $input.all();
-
-// Configuration
-const BATCH_SIZE = 50; // Process 50 emails at a time
-const START_INDEX = 0; // Change this for each batch run
-
-// Take a batch slice
-const batch = items.slice(START_INDEX, START_INDEX + BATCH_SIZE);
-
-console.log(`📦 Total sent emails: ${items.length}`);
-console.log(`🔄 Processing batch: ${START_INDEX} to ${START_INDEX + BATCH_SIZE}`);
-console.log(`✉️ Emails in this batch: ${batch.length}`);
-console.log(`⏭️ Remaining: ${items.length - (START_INDEX + BATCH_SIZE)} emails`);
-
-// Collect all message JSONs
+// ============================================
+// STEP 4: Prepare for API
+// ============================================
 const emails = batch.map(i => i.json);
+
+// Extract user ID from first email
 const userId = batch[0]?.json?.from?.emailAddress?.address || "unknown_user";
 
 return [{
@@ -64,5 +50,3 @@ return [{
     user_id: userId
   }
 }];
-
-
