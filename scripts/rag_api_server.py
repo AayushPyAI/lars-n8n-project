@@ -479,6 +479,30 @@ def generate_draft():
             # Clean up the name
             sender_name = re.sub(r'\s+', ' ', sender_name).strip()
         
+        # Detect language from incoming email
+        email_text = f"{incoming_email.get('subject', '')} {incoming_email.get('body', '')}".lower()
+        
+        # Simple language detection based on common words
+        german_words = ['ich', 'sie', 'der', 'die', 'das', 'und', 'mit', 'für', 'ist', 'haben', 'können', 'bitte', 'danke', 'sehr geehrte']
+        english_words = ['the', 'and', 'for', 'you', 'can', 'please', 'thank', 'regards', 'meeting', 'schedule']
+        
+        german_count = sum(1 for word in german_words if word in email_text)
+        english_count = sum(1 for word in english_words if word in email_text)
+        
+        # Determine language
+        if german_count > english_count:
+            language = "German"
+            language_instruction = "auf Deutsch"
+            greeting_examples = "Hallo, Guten Tag, Sehr geehrte/r"
+            closing_examples = "Mit freundlichen Grüßen, Beste Grüße, Viele Grüße"
+        else:
+            language = "English"
+            language_instruction = "in English"
+            greeting_examples = "Hello, Hi, Dear"
+            closing_examples = "Best regards, Sincerely, Kind regards"
+        
+        print(f"🌐 Detected language: {language}", file=sys.stderr)
+        
         # Build the prompt with example
         example_prompt = """Example:
 Incoming email:
@@ -496,7 +520,7 @@ I'm available on Tuesday and Wednesday afternoon. Please let me know which time 
 Best regards
 """
 
-        prompt = f"""You are a professional email assistant. Write a business email reply in English.
+        prompt = f"""You are a professional email assistant. Write a business email reply {language_instruction}.
 
 {example_prompt}
 
@@ -514,18 +538,18 @@ Category: {category or 'sonstige'}
 {style_text}
 
 IMPORTANT INSTRUCTIONS:
-1. Write ONLY the email body text - DO NOT include "Subject:" line in the body
-2. Address the sender: {"Use 'Hello " + sender_name + ",' or 'Hi " + sender_name + ",' at the beginning" if sender_name else "Use 'Hello,' or 'Hi there,' (do NOT use the email address name)"}
-3. Respond appropriately to what they are asking - read the incoming email body carefully
-4. Match the writing style from the examples above
-5. Keep it concise (2-4 paragraphs)
-6. End with a professional closing (e.g., "Best regards," "Sincerely,") - DO NOT include your own name after the closing
-7. DO NOT include separators like "---" or "---" at the end
-8. DO NOT include the subject line in the body - only write the body content
-9. DO NOT address yourself - address the person who sent you the email
-10. DO NOT sign with your own name - just end with "Best regards," or similar
+1. LANGUAGE: Write the reply {language_instruction} (the same language as the incoming email)
+2. GREETING: Use appropriate greeting in {language}: {greeting_examples}
+3. ADDRESSING: Address the sender by name if available: {sender_name if sender_name else "use generic greeting"}
+4. CONTENT: Respond appropriately to what they are asking - read the incoming email body carefully
+5. STYLE: Match the writing style and tone from the examples above
+6. LENGTH: Keep it concise (2-4 paragraphs)
+7. CLOSING: End with a professional closing {language_instruction}: {closing_examples}
+8. FORMAT: Write ONLY the email body text - DO NOT include "Subject:" line in the body
+9. NO SEPARATORS: DO NOT include separators like "---" at the end
+10. NO SIGNATURE: DO NOT sign with your own name - just end with the closing phrase
 
-REPLY (email body only, no subject line, no signature):"""
+REPLY ({language} email body only, no subject line, no signature):"""
 
         # Call Ollama to generate draft
         ollama_url = "http://localhost:11434"
