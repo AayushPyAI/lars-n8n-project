@@ -634,12 +634,18 @@ REPLY ({language} email body only, no subject line, no signature):"""
         ollama_url = "http://localhost:11434"
         generate_url = f"{ollama_url}/api/generate"
         
-        # Try multiple model name variations
+        # Try multiple model name variations (including common alternatives)
+        # Prioritize smaller/faster models first, then fallback to larger ones
         model_variations = [
-            "llama3.2:3b",
-            "llama3.2",
-            "llama3.2:latest",
-            "llama3.2:3B"
+            "llama3.2:3b",      # Preferred small model
+            "llama3.2",         # Without tag
+            "llama3.2:latest",  # Latest version
+            "llama3.2:3B",      # Capital B variant
+            "llama3:8b",        # Alternative llama3 model (commonly available)
+            "llama3:8B",        # Capital B variant
+            "llama3",           # Generic llama3
+            "phi3:mini",        # Lightweight alternative
+            "phi3"              # Generic phi3
         ]
         
         payload_template = {
