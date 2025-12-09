@@ -65,6 +65,27 @@ def save_drafts():
 load_drafts()
 
 
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint - shows available endpoints."""
+    return jsonify({
+        "service": "RAG API Server",
+        "status": "running",
+        "endpoints": {
+            "/health": "GET - Health check",
+            "/clear-cache": "GET/POST - Clear deduplication cache",
+            "/process-email": "POST - Process a single email",
+            "/process-batch": "POST - Process multiple emails",
+            "/search": "POST - Search RAG database",
+            "/generate-draft": "POST - Generate email draft",
+            "/find-draft": "POST - Find original draft for sent email",
+            "/update-feedback": "POST - Update feedback from user edits",
+            "/stats": "GET - Get database statistics"
+        },
+        "message": "Server is running. Use /health to check status."
+    })
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
