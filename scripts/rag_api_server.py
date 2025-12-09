@@ -92,6 +92,64 @@ def health():
     return jsonify({"status": "ok", "message": "RAG API Server is running"})
 
 
+@app.route('/test-ollama', methods=['GET'])
+def test_ollama():
+    """Test Ollama connectivity and list available models."""
+    import requests as req
+    ollama_url = "http://localhost:11434"
+    
+    results = {
+        "ollama_url": ollama_url,
+        "connection_test": False,
+        "available_models": [],
+        "error": None
+    }
+    
+    try:
+        # Test connection to Ollama
+        try:
+            response = req.get(f"{ollama_url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                results["connection_test"] = True
+                data = response.json()
+                # Extract model names
+                models = data.get('models', [])
+                results["available_models"] = [m.get('name', 'unknown') for m in models]
+                
+                # Check if our model exists
+                target_model = "llama3.2:3b"
+                model_variations = [
+                    "llama3.2:3b",
+                    "llama3.2",
+                    "llama3.2:latest",
+                    "llama3.2:3B"
+                ]
+                
+                found_model = None
+                for model_name in results["available_models"]:
+                    if any(variant in model_name for variant in model_variations):
+                        found_model = model_name
+                        break
+                
+                if found_model:
+                    results["target_model_found"] = True
+                    results["exact_model_name"] = found_model
+                else:
+                    results["target_model_found"] = False
+                    results["hint"] = f"Model '{target_model}' not found. Available models: {', '.join(results['available_models'])}"
+            else:
+                results["error"] = f"Ollama returned status {response.status_code}: {response.text[:200]}"
+        except req.exceptions.ConnectionError:
+            results["error"] = f"Cannot connect to Ollama at {ollama_url}. Is Ollama running?"
+        except Exception as e:
+            results["error"] = str(e)
+            
+    except Exception as e:
+        results["error"] = str(e)
+    
+    return jsonify(results)
+
+
 @app.route('/clear-cache', methods=['POST', 'GET'])
 def clear_cache():
     """Clear deduplication cache (useful for testing)."""
@@ -576,8 +634,15 @@ REPLY ({language} email body only, no subject line, no signature):"""
         ollama_url = "http://localhost:11434"
         generate_url = f"{ollama_url}/api/generate"
         
-        payload = {
-            "model": "llama3.2:3b",
+        # Try multiple model name variations
+        model_variations = [
+            "llama3.2:3b",
+            "llama3.2",
+            "llama3.2:latest",
+            "llama3.2:3B"
+        ]
+        
+        payload_template = {
             "prompt": prompt,
             "stream": False,
             "options": {
@@ -587,7 +652,65 @@ REPLY ({language} email body only, no subject line, no signature):"""
             }
         }
         
-        response = req.post(generate_url, json=payload, timeout=60)
+        # Try each model variation until one works
+        last_error = None
+        response = None
+        
+        for model_name in model_variations:
+            payload = {**payload_template, "model": model_name}
+            print(f"🤖 Trying Ollama model: {model_name}", file=sys.stderr)
+            
+            try:
+                response = req.post(generate_url, json=payload, timeout=60)
+                
+                if response.status_code == 200:
+                    print(f"✅ Successfully using model: {model_name}", file=sys.stderr)
+                    break
+                elif response.status_code == 404:
+                    last_error = f"Model '{model_name}' not found"
+                    print(f"⚠️ {last_error}, trying next variation...", file=sys.stderr)
+                    continue
+                else:
+                    last_error = f"Status {response.status_code}: {response.text[:200]}"
+                    print(f"⚠️ {last_error}, trying next variation...", file=sys.stderr)
+                    continue
+            except req.exceptions.ConnectionError:
+                last_error = f"Cannot connect to Ollama at {ollama_url}"
+                print(f"❌ Connection error: {last_error}", file=sys.stderr)
+                return jsonify({
+                    "success": False,
+                    "error": last_error,
+                    "hint": "Check if Ollama is running: docker ps | grep ollama"
+                }), 500
+            except Exception as e:
+                last_error = str(e)
+                print(f"⚠️ Error with {model_name}: {last_error}, trying next...", file=sys.stderr)
+                continue
+        
+        # If all models failed, get available models and return helpful error
+        if response is None or response.status_code != 200:
+            available_models = []
+            try:
+                tags_response = req.get(f"{ollama_url}/api/tags", timeout=5)
+                if tags_response.status_code == 200:
+                    tags_data = tags_response.json()
+                    available_models = [m.get('name', 'unknown') for m in tags_data.get('models', [])]
+            except:
+                pass
+            
+            error_msg = f"None of the model variations worked. Last error: {last_error}"
+            print(f"❌ {error_msg}", file=sys.stderr)
+            if available_models:
+                print(f"   Available models: {', '.join(available_models)}", file=sys.stderr)
+            
+            return jsonify({
+                "success": False,
+                "error": error_msg,
+                "tried_models": model_variations,
+                "available_models": available_models,
+                "hint": f"Install the model: docker exec -it ollama_local ollama pull llama3.2:3b"
+            }), 500
+        
         response.raise_for_status()
         result = response.json()
         
